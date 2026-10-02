@@ -586,7 +586,7 @@ def call_gemini(lines, image_path=None, retries_per_model=2):
             except Exception as e:
                 last_error = str(e)
                 print(f"[{model_name}] Error: {last_error[:200]}")
-                # If model is experiencing temporary demand spikes (503), fast-fail to next model immediately
+                # If model is expiencing temporary demand spikes (503), fast-fail to next model immediately
                 if "503" in last_error or "UNAVAILABLE" in last_error or "429" in last_error:
                     print(f"{model_name} currently unavailable (503/429), immediately falling back to next candidate...\n")
                     break
