@@ -295,11 +295,21 @@ export default function DashboardPage() {
                         </td>
 
                         <td className="py-3.5 px-4">
-                          <div className="font-semibold text-slate-200">
+                          <Link
+                            href={`/patients/${encodeURIComponent(item.patient_id)}`}
+                            className="font-semibold text-slate-200 hover:text-cyan-400 transition-colors block"
+                            title="View Patient Medical Record & Timeline"
+                          >
                             {patient.name || `Patient ID: ${item.patient_id}`}
-                          </div>
+                          </Link>
                           <div className="text-[11px] text-slate-500 flex items-center gap-1.5 mt-0.5">
-                            <span className="font-mono">ID: {item.patient_id}</span>
+                            <Link
+                              href={`/patients/${encodeURIComponent(item.patient_id)}`}
+                              className="font-mono text-cyan-400/90 hover:text-cyan-300 underline"
+                              title="Jump to Patient Timeline"
+                            >
+                              ID: {item.patient_id}
+                            </Link>
                             {patient.age && <span>• {patient.age}y</span>}
                             {patient.sex && <span>• {patient.sex}</span>}
                           </div>
@@ -335,13 +345,24 @@ export default function DashboardPage() {
                         </td>
 
                         <td className="py-3.5 px-4 text-right">
-                          <Link
-                            href={`/extractions/${item.extraction_id}`}
-                            className="inline-flex items-center gap-1 px-3 py-1 rounded-lg text-xs font-semibold bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 transition-colors"
-                          >
-                            Review
-                            <ArrowRight className="w-3 h-3" />
-                          </Link>
+                          <div className="inline-flex items-center gap-1.5">
+                            {item.status === "CONFIRMED" && (
+                              <Link
+                                href={`/patients/${encodeURIComponent(item.patient_id)}`}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 transition-colors"
+                                title="View Patient Medical Record & Timeline"
+                              >
+                                Record
+                              </Link>
+                            )}
+                            <Link
+                              href={`/extractions/${item.extraction_id}`}
+                              className="inline-flex items-center gap-1 px-3 py-1 rounded-lg text-xs font-semibold bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 transition-colors"
+                            >
+                              {item.status === "CONFIRMED" ? "Details" : "Review"}
+                              <ArrowRight className="w-3 h-3" />
+                            </Link>
+                          </div>
                         </td>
                       </tr>
                     );

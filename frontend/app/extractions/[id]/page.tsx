@@ -83,12 +83,12 @@ export default function ExtractionDetailsPage({
     loadData();
   }, [id]);
 
-  const handleRecordFieldChange = (section: keyof PrescriptionRecord, field: string, value: string) => {
+  const handleRecordFieldChange = (section: "patient" | "doctor", field: string, value: string) => {
     if (!record) return;
     setRecord({
       ...record,
       [section]: {
-        ...(record[section] as any),
+        ...((record[section] || {}) as any),
         [field]: value.trim() === "" ? null : value,
       },
     });
@@ -104,22 +104,63 @@ export default function ExtractionDetailsPage({
 
   const handleConfirm = async (allowDuplicate = false) => {
     if (!record || !payload) return;
-    setConfirming(true);
+    setError(null);
     setDuplicateWarning(null);
+
+    // Ensure valid ISO date or fallback to today
+    let dateIso = record.date_iso?.trim();
+    if (!dateIso) {
+      dateIso = new Date().toISOString().split("T")[0];
+    }
+
+    if (!record.medicines || record.medicines.length === 0) {
+      setError("At least one medicine is required to confirm the prescription. Please add a medication.");
+      return;
+    }
+
+    const currentPatientId = record.patient?.uhid?.trim() || payload.patient_id || "UNKNOWN";
+
+    const updatedRecord: PrescriptionRecord = {
+      ...record,
+      date_iso: dateIso,
+      patient: {
+        ...(record.patient || {}),
+        name: record.patient?.name || null,
+        uhid: record.patient?.uhid || null,
+      },
+      doctor: {
+        ...(record.doctor || {}),
+        name: record.doctor?.name || null,
+        reg_no: record.doctor?.reg_no || null,
+      },
+    };
+    setRecord(updatedRecord);
+    setConfirming(true);
 
     try {
       const result = await clientApi.confirmExtraction(
         payload.extraction_id,
-        record,
+        updatedRecord,
         confirmedBy,
         allowDuplicate
       );
       setConfirmSuccess(result);
-      // Reload payload to update status to CONFIRMED
-      loadData();
+      setError(null);
+      // Immediately reflect confirmed status in state
+      setPayload((prev) => (prev ? { ...prev, status: "CONFIRMED" } : null));
     } catch (err: any) {
       if (err.status === 409 && err.message?.includes("duplicate")) {
         setDuplicateWarning(err.message);
+      } else if (err.status === 409 && err.message?.includes("already confirmed")) {
+        setPayload((prev) => (prev ? { ...prev, status: "CONFIRMED" } : null));
+        setConfirmSuccess({
+          prescription_id: Number(id),
+          patient_id: currentPatientId,
+          rx_date: dateIso,
+          edits: [],
+          observations_saved: 0,
+          observations_skipped: [],
+        });
       } else {
         setError(err.message || "Failed to confirm prescription.");
       }
@@ -180,6 +221,7 @@ export default function ExtractionDetailsPage({
   const isConfirmed = payload.status === "CONFIRMED";
   const isDiscarded = payload.status === "DISCARDED";
   const isPending = payload.status === "PENDING_USER_CONFIRMATION";
+  const patientId = record.patient?.uhid?.trim() || payload.patient_id || "UNKNOWN";
 
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 pt-8 space-y-6">
@@ -206,26 +248,39 @@ export default function ExtractionDetailsPage({
           </div>
         </div>
 
-        {/* View Switcher Tabs */}
-        <div className="flex items-center rounded-xl bg-slate-900 p-1 border border-slate-800 text-xs font-medium">
-          <button
-            onClick={() => setActiveTab("review")}
-            className={`px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5 ${
-              activeTab === "review" ? "bg-cyan-500/20 text-cyan-300 shadow-sm" : "text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            <Edit3 className="w-3.5 h-3.5" />
-            Clinical Review
-          </button>
-          <button
-            onClick={() => setActiveTab("rawOcr")}
-            className={`px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5 ${
-              activeTab === "rawOcr" ? "bg-cyan-500/20 text-cyan-300 shadow-sm" : "text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            <FileText className="w-3.5 h-3.5" />
-            Raw OCR Inspector
-          </button>
+        {/* View Switcher Tabs & Quick Patient Link */}
+        <div className="flex items-center gap-2.5">
+          {isConfirmed && (
+            <Link
+              href={`/patients/${encodeURIComponent(patientId)}`}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-xs font-semibold transition-all hover:scale-105"
+            >
+              <CheckCircle2 className="w-3.5 h-3.5" />
+              <span>Patient Record ({patientId})</span>
+              <ExternalLink className="w-3 h-3" />
+            </Link>
+          )}
+
+          <div className="flex items-center rounded-xl bg-slate-900 p-1 border border-slate-800 text-xs font-medium">
+            <button
+              onClick={() => setActiveTab("review")}
+              className={`px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5 ${
+                activeTab === "review" ? "bg-cyan-500/20 text-cyan-300 shadow-sm" : "text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              <Edit3 className="w-3.5 h-3.5" />
+              Clinical Review
+            </button>
+            <button
+              onClick={() => setActiveTab("rawOcr")}
+              className={`px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5 ${
+                activeTab === "rawOcr" ? "bg-cyan-500/20 text-cyan-300 shadow-sm" : "text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              <FileText className="w-3.5 h-3.5" />
+              Raw OCR Inspector
+            </button>
+          </div>
         </div>
       </div>
 
@@ -234,14 +289,64 @@ export default function ExtractionDetailsPage({
 
       {/* Success Notification Modal / Alert */}
       {confirmSuccess && (
-        <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-200 text-xs space-y-1">
-          <div className="font-semibold text-emerald-300 flex items-center gap-2 text-sm">
-            <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-            Prescription #{confirmSuccess.prescription_id} Confirmed & Saved to Patient Record
+        <div className="p-5 rounded-2xl bg-gradient-to-r from-emerald-950/70 to-teal-950/50 border border-emerald-500/40 text-emerald-200 text-xs shadow-2xl shadow-emerald-950/40 space-y-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2 border-b border-emerald-500/20">
+            <div className="flex items-center gap-3">
+              <div className="p-2.5 rounded-xl bg-emerald-500/20 text-emerald-400 shrink-0">
+                <CheckCircle2 className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                  Prescription #{confirmSuccess.prescription_id} Confirmed & Saved to Patient Record
+                </h3>
+                <p className="text-xs text-emerald-300/80 mt-0.5">
+                  Saved under Patient ID: <strong className="font-mono text-white">{confirmSuccess.patient_id}</strong> • Date: <strong className="font-mono text-emerald-200">{confirmSuccess.rx_date}</strong>
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2.5">
+              <Link
+                href={`/patients/${encodeURIComponent(confirmSuccess.patient_id)}`}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-bold text-xs shadow-lg shadow-emerald-500/25 transition-all hover:scale-105"
+              >
+                <span>View Patient Medical Record</span>
+                <ExternalLink className="w-3.5 h-3.5" />
+              </Link>
+              <Link
+                href="/"
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 text-xs font-semibold border border-slate-700 transition-colors"
+              >
+                Dashboard
+              </Link>
+            </div>
           </div>
-          <p className="text-[11px] text-emerald-200/90">
-            Recorded {confirmSuccess.edits.length} user modifications. Saved {confirmSuccess.observations_saved} clinical vitals/observations.
-          </p>
+
+          <div className="flex flex-wrap items-center gap-4 text-[11px] text-emerald-300/90">
+            <span>• Clinician modifications saved: <strong className="text-white">{confirmSuccess.edits?.length || 0}</strong></span>
+            <span>• Clinical vitals/observations saved: <strong className="text-white">{confirmSuccess.observations_saved || 0}</strong></span>
+            {confirmSuccess.observations_skipped && confirmSuccess.observations_skipped.length > 0 && (
+              <span className="text-amber-300/90">• Vitals skipped: {confirmSuccess.observations_skipped.length}</span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Error Alert Notice */}
+      {error && (
+        <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-start gap-2.5">
+          <AlertCircle className="w-4 h-4 shrink-0 text-rose-400 mt-0.5" />
+          <div className="flex-1 space-y-1">
+            <div className="font-semibold text-rose-200">Confirmation Alert</div>
+            <div className="leading-relaxed">{error}</div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setError(null)}
+            className="text-slate-400 hover:text-white text-xs px-2 py-1 rounded bg-slate-900 border border-slate-800"
+          >
+            Dismiss
+          </button>
         </div>
       )}
 
@@ -315,16 +420,27 @@ export default function ExtractionDetailsPage({
                 <div className="grid grid-cols-3 gap-2 text-xs">
                   <div>
                     <label className="text-[10px] text-slate-500 block">UHID / ID</label>
-                    <span className="font-mono text-slate-300 font-semibold">{record.patient.uhid || "—"}</span>
+                    <span className="font-mono text-slate-300 font-semibold">{patientId}</span>
                   </div>
                   <div>
                     <label className="text-[10px] text-slate-500 block">Age</label>
-                    <span className="text-slate-300">{record.patient.age ? `${record.patient.age}y` : "—"}</span>
+                    <span className="text-slate-300">{record.patient?.age ? `${record.patient.age}y` : "—"}</span>
                   </div>
                   <div>
                     <label className="text-[10px] text-slate-500 block">Sex</label>
-                    <span className="text-slate-300">{record.patient.sex || "—"}</span>
+                    <span className="text-slate-300">{record.patient?.sex || "—"}</span>
                   </div>
+                </div>
+
+                <div className="pt-2 border-t border-slate-800/60 flex items-center justify-between">
+                  <span className="text-[10px] text-slate-500">Clinical History:</span>
+                  <Link
+                    href={`/patients/${encodeURIComponent(patientId)}`}
+                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-cyan-400 hover:text-cyan-300 transition-colors"
+                  >
+                    <span>View Patient Timeline</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </Link>
                 </div>
               </div>
 
@@ -337,11 +453,11 @@ export default function ExtractionDetailsPage({
                 <div>
                   <label className="text-[11px] text-slate-400 block mb-0.5">Doctor Name</label>
                   {isConfirmed ? (
-                    <div className="text-sm font-semibold text-slate-100">{record.doctor.name || "Not detected"}</div>
+                    <div className="text-sm font-semibold text-slate-100">{record.doctor?.name || "Not detected"}</div>
                   ) : (
                     <input
                       type="text"
-                      value={record.doctor.name || ""}
+                      value={record.doctor?.name || ""}
                       onChange={(e) => handleRecordFieldChange("doctor", "name", e.target.value)}
                       placeholder="Doctor Name"
                       className="w-full text-sm font-semibold text-slate-100 bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-cyan-500"
@@ -350,7 +466,7 @@ export default function ExtractionDetailsPage({
                 </div>
                 <div>
                   <label className="text-[10px] text-slate-500 block">Registration No.</label>
-                  <span className="font-mono text-xs text-slate-300 font-semibold">{record.doctor.reg_no || "—"}</span>
+                  <span className="font-mono text-xs text-slate-300 font-semibold">{record.doctor?.reg_no || "—"}</span>
                 </div>
               </div>
 

@@ -31,6 +31,9 @@ export async function pythonBackendFetch<T>(
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
+  const startTime = Date.now();
+  console.log(`[${new Date().toISOString()}] [PROXY -> PYTHON] POST /${endpoint.replace(/^\/+/, "")} dispatching (timeout=${timeoutMs}ms)`);
+
   try {
     const res = await fetch(url, {
       ...options,
@@ -40,6 +43,8 @@ export async function pythonBackendFetch<T>(
     });
 
     clearTimeout(timeoutId);
+    const elapsedMs = Date.now() - startTime;
+    console.log(`[${new Date().toISOString()}] [PROXY -> PYTHON] POST /${endpoint.replace(/^\/+/, "")} completed in ${elapsedMs}ms with status ${res.status}`);
 
     const contentType = res.headers.get("content-type") || "";
     const isJson = contentType.includes("application/json");
@@ -51,7 +56,11 @@ export async function pythonBackendFetch<T>(
       if (isJson) {
         try {
           const errBody = await res.json();
-          errMsg = errBody.detail || errBody.error || errMsg;
+          if (Array.isArray(errBody.detail)) {
+            errMsg = errBody.detail.map((d: any) => `${d.loc?.join(".") || "field"}: ${d.msg}`).join("; ");
+          } else {
+            errMsg = errBody.detail || errBody.error || errMsg;
+          }
           rawOcrId = errBody.raw_ocr_id;
         } catch {
           // ignore json parse error
@@ -61,6 +70,7 @@ export async function pythonBackendFetch<T>(
         if (text) errMsg = text.slice(0, 300);
       }
 
+      console.warn(`[${new Date().toISOString()}] [PROXY -> PYTHON] Error response from backend: ${errMsg} (rawOcrId: ${rawOcrId ?? "none"})`);
       return {
         ok: false,
         status: res.status,
@@ -73,11 +83,13 @@ export async function pythonBackendFetch<T>(
     return { ok: true, status: res.status, data };
   } catch (err: any) {
     clearTimeout(timeoutId);
+    const elapsedMs = Date.now() - startTime;
+    console.error(`[${new Date().toISOString()}] [PROXY -> PYTHON] Exception after ${elapsedMs}ms:`, err);
     if (err.name === "AbortError") {
       return {
         ok: false,
         status: 504,
-        error: `Request timed out after ${timeoutMs / 1000} seconds. The OCR/LLM model is taking longer than usual on CPU.`,
+        error: `Request timed out after ${timeoutMs / 1000} seconds. The PaddleOCR-VL model on CPU took longer than allowed. Check dashboard to see if the extraction completed in background.`,
       };
     }
     return {
@@ -141,20 +153,39 @@ export const clientApi = {
       formData.append("patient_name", patientName.trim());
     }
 
-    const res = await fetch("/api/ocr", {
-      method: "POST",
-      body: formData,
-    });
+    const controller = new AbortController();
+    const clientTimeoutMs = 360000; // 6 minutes client-side safety timeout
+    const timeoutId = setTimeout(() => controller.abort(), clientTimeoutMs);
 
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      const err: any = new Error(body.error || `Upload and OCR failed (${res.status})`);
-      err.status = res.status;
-      err.rawOcrId = body.raw_ocr_id;
+    try {
+      const res = await fetch("/api/ocr", {
+        method: "POST",
+        body: formData,
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const err: any = new Error(body.error || `Upload and OCR failed with status ${res.status}`);
+        err.status = res.status;
+        err.rawOcrId = body.raw_ocr_id;
+        throw err;
+      }
+
+      return body;
+    } catch (err: any) {
+      clearTimeout(timeoutId);
+      if (err.name === "AbortError") {
+        const timeoutErr: any = new Error(
+          "Upload request timed out after 6 minutes. The vision transformer on CPU is taking extra time for this high-resolution image. Please check the dashboard or retry with a lighter photo."
+        );
+        timeoutErr.status = 504;
+        throw timeoutErr;
+      }
       throw err;
     }
-
-    return body;
   },
 
   async confirmExtraction(

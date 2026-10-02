@@ -37,6 +37,7 @@ export default function UploadPage() {
   const [step, setStep] = useState<ProcessingStep>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [rawOcrId, setRawOcrId] = useState<number | undefined>(undefined);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
 
   const handleFileSelect = (file: File) => {
     setErrorMessage(null);
@@ -101,11 +102,22 @@ export default function UploadPage() {
 
     setErrorMessage(null);
     setStep("uploading");
+    setElapsedSeconds(0);
 
-    // Realistic step progression simulation for UI feedback while waiting for synchronous backend
-    const ocrTimer = setTimeout(() => setStep("ocr"), 2000);
-    const structTimer = setTimeout(() => setStep("structuring"), 15000);
-    const finalTimer = setTimeout(() => setStep("finalizing"), 35000);
+    // Live elapsed timer for realistic transparency during heavy CPU vision inference
+    const timerInterval = setInterval(() => {
+      setElapsedSeconds((prev) => {
+        const next = prev + 1;
+        if (next >= 3 && next < 45) {
+          setStep("ocr");
+        } else if (next >= 45 && next < 65) {
+          setStep("structuring");
+        } else if (next >= 65) {
+          setStep("finalizing");
+        }
+        return next;
+      });
+    }, 1000);
 
     try {
       const result = await clientApi.uploadPrescription(
@@ -114,17 +126,13 @@ export default function UploadPage() {
         patientName.trim() || undefined
       );
 
-      clearTimeout(ocrTimer);
-      clearTimeout(structTimer);
-      clearTimeout(finalTimer);
+      clearInterval(timerInterval);
       setStep("success");
 
       // Redirect directly to review the extracted draft
       router.push(`/extractions/${result.extraction_id}`);
     } catch (err: any) {
-      clearTimeout(ocrTimer);
-      clearTimeout(structTimer);
-      clearTimeout(finalTimer);
+      clearInterval(timerInterval);
       setStep("error");
       setErrorMessage(err.message || "Failed to process prescription image.");
       if (err.rawOcrId) {
@@ -274,16 +282,28 @@ export default function UploadPage() {
           <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-300 text-xs flex items-start gap-2.5">
             <AlertCircle className="w-4 h-4 shrink-0 text-rose-400 mt-0.5" />
             <div className="flex-1 space-y-2">
-              <div className="font-semibold text-rose-200">Processing Notice</div>
-              <div>{errorMessage}</div>
+              <div className="font-semibold text-rose-200">Processing Alert</div>
+              <div className="leading-relaxed">{errorMessage}</div>
               <div className="pt-1 flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setErrorMessage(null);
+                    setStep("idle");
+                    setElapsedSeconds(0);
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-xs border border-slate-700 transition-colors"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  Try Again / Re-upload
+                </button>
                 <button
                   type="button"
                   onClick={() => router.push("/")}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-200 font-semibold text-xs border border-cyan-500/40 transition-colors"
                 >
                   <ArrowRight className="w-3 h-3" />
-                  View Completed Drafts in Dashboard
+                  Check Dashboard for Results
                 </button>
                 {rawOcrId && (
                   <button
@@ -307,28 +327,49 @@ export default function UploadPage() {
               <span className="flex items-center gap-2">
                 <RefreshCw className="w-4 h-4 text-cyan-400 animate-spin" />
                 {step === "uploading" && "Uploading prescription image..."}
-                {step === "ocr" && "PaddleOCR-VL analyzing document layout & extracting text..."}
+                {step === "ocr" && "PaddleOCR-VL analyzing document layout & vision tokens on CPU..."}
                 {step === "structuring" && "Google Gemini structuring medications, vitals & dosages..."}
                 {step === "finalizing" && "Validating against Drug Master & checking clinical safety rules..."}
               </span>
-              <span className="font-mono text-cyan-400">
-                {step === "uploading" ? "15%" : step === "ocr" ? "45%" : step === "structuring" ? "80%" : "95%"}
-              </span>
+              <div className="flex items-center gap-2">
+                <span className="px-2 py-0.5 rounded-full bg-slate-800 text-[11px] font-mono text-cyan-300 border border-slate-700">
+                  ⏱️ {elapsedSeconds}s
+                </span>
+                <span className="font-mono text-cyan-400">
+                  {step === "uploading"
+                    ? "15%"
+                    : step === "ocr"
+                    ? `${Math.min(75, 20 + Math.floor(elapsedSeconds * 1.2))}%`
+                    : step === "structuring"
+                    ? "85%"
+                    : "95%"}
+                </span>
+              </div>
             </div>
 
             <div className="w-full h-2 bg-slate-800 rounded-full overflow-hidden">
               <div
-                className="h-full bg-gradient-to-r from-cyan-500 to-teal-400 transition-all duration-700 ease-out"
+                className="h-full bg-gradient-to-r from-cyan-500 to-teal-400 transition-all duration-500 ease-out"
                 style={{
                   width:
-                    step === "uploading" ? "20%" : step === "ocr" ? "50%" : step === "structuring" ? "85%" : "98%",
+                    step === "uploading"
+                      ? "15%"
+                      : step === "ocr"
+                      ? `${Math.min(75, 20 + Math.floor(elapsedSeconds * 1.2))}%`
+                      : step === "structuring"
+                      ? "85%"
+                      : "95%",
                 }}
               />
             </div>
 
-            <p className="text-[11px] text-slate-400 leading-relaxed">
-              Note: PaddleOCR-VL is running on CPU. Generation and reading order reconstruction can take 30 to 90 seconds. Please keep this tab open.
-            </p>
+            <div className="flex items-start justify-between text-[11px] text-slate-400 leading-relaxed">
+              <span>
+                {elapsedSeconds > 60
+                  ? "PaddleOCR-VL is processing complex vision tokens on CPU. The pipeline is actively running—please keep this page open."
+                  : "Note: PaddleOCR-VL runs on CPU (typically 30–60s). Please keep this page open."}
+              </span>
+            </div>
           </div>
         )}
 

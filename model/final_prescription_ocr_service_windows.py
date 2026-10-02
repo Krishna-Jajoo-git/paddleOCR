@@ -2,8 +2,18 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-import os, re, io, json, time, hashlib, datetime, statistics, threading, secrets, getpass, subprocess, csv
+import os, re, io, json, time, hashlib, datetime, statistics, threading, secrets, getpass, subprocess, csv, warnings, traceback
 from typing import List, Optional
+
+warnings.filterwarnings("ignore", message=".*To copy construct from a tensor.*")
+warnings.filterwarnings("ignore", message=".*Non compatible API.*")
+warnings.filterwarnings("ignore", message=".*No ccache found.*")
+
+
+def log_stage(stage: str, msg: str, elapsed: Optional[float] = None):
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    elapsed_str = f" | elapsed={elapsed:.2f}s" if elapsed is not None else ""
+    print(f"[{ts}] [{stage}] {msg}{elapsed_str}", flush=True)
 
 
 def _secret(name, prompt=False):
@@ -40,7 +50,7 @@ USE_UNWARPING = False       # True for curved / photographed pages
 
 # ---- upload limits ---------------------------------------------------------------------------------------
 MAX_UPLOAD_MB = 10
-ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp"}
+ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp", "image/jpg", "image/pjpeg"}
 
 # ---- database --------------------------------------------------------------------------------------------
 if not DATABASE_URL:
@@ -211,7 +221,7 @@ from PIL import Image, ImageOps
 PRE_DIR = "preprocessed"
 os.makedirs(PRE_DIR, exist_ok=True)
 
-def preprocess_image(data: bytes, min_long_side=1600, max_long_side=3500):
+def preprocess_image(data: bytes, min_long_side=1200, max_long_side=1800):
     """bytes -> path of cleaned PNG, (w, h). Fixes phone rotation, faded ink, tiny and huge images."""
     img = Image.open(io.BytesIO(data))
     img = ImageOps.exif_transpose(img).convert("RGB")
@@ -947,28 +957,47 @@ def _payload(extraction_id, raw_id, status, analysis, model, duplicate=False):
 
 def structure_from_raw(raw_id, expected_name=None, image_path=None):
     """Step 4-6: run the LLM on the STORED raw OCR (also used to retry after an LLM failure without re-running OCR)."""
+    t_start = time.time()
+    log_stage("DB_FETCH", f"Fetching stored raw OCR lines for raw_ocr_id={raw_id}")
     with engine.connect() as c:
         row = c.execute(select(raw_ocr).where(raw_ocr.c.id == raw_id)).mappings().first()
     if not row:
+        log_stage("ERROR", f"raw_ocr row #{raw_id} not found in database")
         raise PipelineError("raw_ocr row not found", http=404)
     lines = json.loads(row["lines_json"])
     by_id = {l["id"]: l for l in lines}
+    log_stage("LLM_STRUCTURING", f"Invoking Google Gemini on {len(lines)} OCR lines...")
+    t_llm = time.time()
     try:
         rx, model = call_gemini(lines, image_path)
+        log_stage("LLM_STRUCTURING", f"Gemini structuring succeeded using model '{model}'", time.time() - t_llm)
     except Exception as e:
+        log_stage("ERROR", f"Gemini structuring failed: {e}\n{traceback.format_exc()}", time.time() - t_llm)
         with engine.begin() as c:
             audit(c, "llm_failed", None, dict(raw_ocr_id=raw_id, error=str(e)[:300]))
         raise PipelineError(f"LLM structuring failed: {e}", raw_ocr_id=raw_id, http=502)
+
+    t_val = time.time()
+    log_stage("VALIDATION", "Analyzing prescription entities and cross-referencing Drug Master...")
     analysis = analyze_prescription(rx, by_id, expected_name)
+    med_count = len(analysis.get("record", {}).get("medicines", []))
+    gate_st = analysis.get("gate", {}).get("status", "UNKNOWN")
+    log_stage("VALIDATION", f"Validation complete: gate={gate_st}, {med_count} medicines extracted", time.time() - t_val)
+
+    t_db = time.time()
     with engine.begin() as c:
         eid = c.execute(insert(extractions).values(raw_ocr_id=raw_id, llm_model=model, analysis_json=jd(analysis),
                                                    status="PENDING_USER_CONFIRMATION", created_at=now_iso())).inserted_primary_key[0]
-        audit(c, "extracted", eid, dict(raw_ocr_id=raw_id, gate=analysis["gate"]["status"], model=model))
+        audit(c, "extracted", eid, dict(raw_ocr_id=raw_id, gate=gate_st, model=model))
+    log_stage("DATABASE", f"Draft extraction #{eid} committed to database", time.time() - t_db)
+    log_stage("PIPELINE_COMPLETE", f"Structuring completed successfully for extraction #{eid}", time.time() - t_start)
     return _payload(eid, raw_id, "PENDING_USER_CONFIRMATION", analysis, model)
 
 
 def process_image(data: bytes, filename: str, patient_id: str, expected_name: Optional[str] = None):
+    t_pipeline_start = time.time()
     sha = hashlib.sha256(data).hexdigest()
+    log_stage("UPLOAD_RECEIVED", f"Processing upload: filename='{filename}', size={len(data)} bytes, sha256={sha[:12]}...")
 
     # same image already processed for this patient and not discarded -> return it (no second OCR / LLM cost)
     with engine.connect() as c:
@@ -978,24 +1007,46 @@ def process_image(data: bytes, filename: str, patient_id: str, expected_name: Op
             .where(raw_ocr.c.image_sha256 == sha, raw_ocr.c.patient_id == patient_id, extractions.c.status != "DISCARDED")
             .order_by(extractions.c.id.desc())).first()
     if hit:
+        log_stage("CACHE_HIT", f"Identical image already processed for this patient -> returning extraction #{hit.id}", time.time() - t_pipeline_start)
         return _payload(hit.id, hit.raw_ocr_id, hit.status, json.loads(hit.analysis_json), hit.llm_model, duplicate=True)
 
+    t_prep = time.time()
     try:
         path, size = preprocess_image(data)
+        log_stage("PREPROCESSING", f"Image cleaned and saved to {path} (resolution={size[0]}x{size[1]})", time.time() - t_prep)
     except Exception as e:
+        log_stage("ERROR", f"Image preprocessing failed: {e}\n{traceback.format_exc()}", time.time() - t_prep)
         raise PipelineError(f"not a readable image: {e}", http=400)
-    raw, (w, h) = run_ocr(path, size)
+
+    t_ocr = time.time()
+    log_stage("OCR_INFERENCE", f"Starting PaddleOCR-VL model inference on CPU (resolution={size[0]}x{size[1]})...")
+    try:
+        raw, (w, h) = run_ocr(path, size)
+        log_stage("OCR_INFERENCE", f"PaddleOCR-VL inference completed ({len(raw)} text boxes detected)", time.time() - t_ocr)
+    except Exception as e:
+        log_stage("ERROR", f"PaddleOCR-VL inference failed: {e}\n{traceback.format_exc()}", time.time() - t_ocr)
+        raise PipelineError(f"PaddleOCR-VL inference failed: {e}", http=500)
+
+    t_lines = time.time()
     lines = build_lines(raw, w, h)
+    log_stage("LINE_PARSING", f"Reconstructed reading order into {len(lines)} lines", time.time() - t_lines)
+
     if not lines:
+        log_stage("ERROR", "No text found in the image")
         raise PipelineError("no text found in the image - ask the user to re-upload a clearer photo", http=422)
     avg = round(sum(l["conf"] for l in lines) / len(lines), 4)
 
+    t_db = time.time()
     with engine.begin() as c:                      # RAW OCR is saved before the LLM is called
         raw_id = c.execute(insert(raw_ocr).values(image_sha256=sha, patient_id=patient_id, filename=filename, ocr_engine=OCR_ENGINE,
                                                   image_w=w, image_h=h, avg_conf=avg, lines_json=jd(lines),
                                                   created_at=now_iso())).inserted_primary_key[0]
         audit(c, "ocr_saved", None, dict(raw_ocr_id=raw_id, lines=len(lines), avg_conf=avg))
-    return structure_from_raw(raw_id, expected_name, path)
+    log_stage("DATABASE", f"Raw OCR saved with raw_ocr_id={raw_id} (avg_conf={avg})", time.time() - t_db)
+
+    result = structure_from_raw(raw_id, expected_name, path)
+    log_stage("PIPELINE_COMPLETE", "Full prescription pipeline completed successfully", time.time() - t_pipeline_start)
+    return result
 
 """## 8. API (FastAPI)
 
@@ -1038,14 +1089,51 @@ def health():
     return dict(ok=True, ocr=OCR_ENGINE, medicine_names_indexed=len(MED_INDEX), time=now_iso())
 
 
+@app.get("/ocr")
+def api_ocr_info():
+    """Informational endpoint when /ocr is opened via browser GET request."""
+    return dict(
+        status="ready",
+        service="Prescription OCR & Information Extraction Service",
+        protocol="Use HTTP POST with multipart/form-data to submit a prescription image for OCR.",
+        required_method="POST",
+        required_headers={"X-API-Key": "<API_TOKEN>"},
+        required_form_fields={
+            "file": "Image file (JPEG, PNG, WebP up to 10MB)",
+            "patient_id": "Patient identifier / UHID (e.g. UHID-10023, P-101)",
+        },
+        optional_form_fields={
+            "patient_name": "Patient full name (for record cross-referencing)",
+        },
+        web_upload_ui="http://localhost:3000/upload",
+        swagger_docs="/docs#/default/api_ocr_ocr_post",
+    )
+
+
 @app.post("/ocr", dependencies=[Depends(require_key)])
 def api_ocr(file: UploadFile = File(...), patient_id: str = Form(...), patient_name: Optional[str] = Form(None)):
-    if file.content_type not in ALLOWED_TYPES:
+    t0 = time.time()
+    log_stage("ENDPOINT_OCR", f"Received POST /ocr request: filename='{file.filename}', content_type='{file.content_type}'")
+    ctype = (file.content_type or "").lower().strip()
+    if ctype not in ALLOWED_TYPES and not (file.filename or "").lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+        log_stage("ERROR", f"Rejected unsupported file type: '{file.content_type}'")
         raise HTTPException(415, f"unsupported file type {file.content_type}; use jpg/png/webp")
     data = file.file.read(MAX_UPLOAD_MB * 1024 * 1024 + 1)
     if len(data) > MAX_UPLOAD_MB * 1024 * 1024:
+        log_stage("ERROR", f"File size exceeds maximum {MAX_UPLOAD_MB} MB")
         raise HTTPException(413, f"file larger than {MAX_UPLOAD_MB} MB")
-    return process_image(data, file.filename or "upload", patient_id, patient_name)
+    try:
+        res = process_image(data, file.filename or "upload", patient_id, patient_name)
+        log_stage("ENDPOINT_OCR", "POST /ocr returning HTTP 200 successfully", time.time() - t0)
+        return res
+    except HTTPException:
+        raise
+    except PipelineError as pe:
+        log_stage("ERROR", f"PipelineError in api_ocr: {pe}\n{traceback.format_exc()}", time.time() - t0)
+        raise
+    except Exception as ex:
+        log_stage("ERROR", f"Unexpected error in api_ocr: {ex}\n{traceback.format_exc()}", time.time() - t0)
+        raise HTTPException(500, f"Internal error during prescription OCR: {ex}")
 
 
 @app.post("/structure/{ocr_id}", dependencies=[Depends(require_key)])
@@ -1094,9 +1182,22 @@ def api_list_extractions(limit: int = 20, patient_id: Optional[str] = None):
 def api_get_extraction(extraction_id: int):
     with engine.connect() as c:
         r = c.execute(select(extractions).where(extractions.c.id == extraction_id)).mappings().first()
-    if not r:
-        raise HTTPException(404, "not found")
-    return _payload(r["id"], r["raw_ocr_id"], r["status"], json.loads(r["analysis_json"]), r["llm_model"])
+        if not r:
+            raise HTTPException(404, "not found")
+        patient_id = c.execute(select(raw_ocr.c.patient_id).where(raw_ocr.c.id == r["raw_ocr_id"])).scalar()
+    
+    analysis = json.loads(r["analysis_json"])
+    if r["status"] == "CONFIRMED":
+        with engine.connect() as c:
+            cp = c.execute(select(confirmed_prescriptions.c.data_json, confirmed_prescriptions.c.patient_id).where(confirmed_prescriptions.c.extraction_id == extraction_id)).mappings().first()
+            if cp and cp["data_json"]:
+                analysis["record"] = json.loads(cp["data_json"])
+                if cp["patient_id"]:
+                    patient_id = cp["patient_id"]
+
+    res = _payload(r["id"], r["raw_ocr_id"], r["status"], analysis, r["llm_model"])
+    res["patient_id"] = patient_id
+    return res
 
 
 @app.get("/raw_ocr/{ocr_id}", dependencies=[Depends(require_key)])
@@ -1135,31 +1236,49 @@ class ConfirmBody(BaseModel):
 
 @app.post("/confirm/{extraction_id}", dependencies=[Depends(require_key)])
 def api_confirm(extraction_id: int, body: ConfirmBody):
+    t0 = time.time()
+    log_stage("CONFIRM", f"Processing confirmation for extraction #{extraction_id}, allow_duplicate={body.allow_duplicate}")
     with engine.connect() as c:
         ex = c.execute(select(extractions).where(extractions.c.id == extraction_id)).mappings().first()
         if not ex:
+            log_stage("ERROR", f"Extraction #{extraction_id} not found")
             raise HTTPException(404, "extraction not found")
         patient_id = c.execute(select(raw_ocr.c.patient_id).where(raw_ocr.c.id == ex["raw_ocr_id"])).scalar()
-    if ex["status"] == "CONFIRMED":
-        raise HTTPException(409, "already confirmed")
-    if ex["status"] == "DISCARDED":
-        raise HTTPException(409, "this draft was discarded")
 
     rec = body.record
+    if not patient_id or str(patient_id).strip() == "":
+        patient_id = (rec.get("patient") or {}).get("uhid") or (rec.get("patient") or {}).get("name") or "UNKNOWN_PATIENT"
+
+    if ex["status"] == "CONFIRMED":
+        log_stage("WARN", f"Extraction #{extraction_id} was already confirmed")
+        with engine.connect() as c:
+            cp = c.execute(select(confirmed_prescriptions).where(confirmed_prescriptions.c.extraction_id == extraction_id)).mappings().first()
+        if cp:
+            return dict(prescription_id=cp["id"], patient_id=cp["patient_id"], rx_date=cp["rx_date"], edits=json.loads(cp["edits_json"] or "[]"),
+                        observations_saved=0, observations_skipped=[], already_confirmed=True)
+        raise HTTPException(409, "already confirmed")
+    if ex["status"] == "DISCARDED":
+        log_stage("WARN", f"Extraction #{extraction_id} was discarded")
+        raise HTTPException(409, "this draft was discarded")
+
     date_iso = rec.get("date_iso")
     try:
         datetime.date.fromisoformat(date_iso or "")
     except ValueError:
         date_iso, _ = parse_date(rec.get("date_raw"))
     if not date_iso:
-        raise HTTPException(422, "date_iso (YYYY-MM-DD) is required - the timeline and trends depend on it")
+        date_iso = datetime.date.today().isoformat()
+        log_stage("CONFIRM", f"No date found in prescription; defaulting to today: {date_iso}")
     rec["date_iso"] = date_iso
     meds = rec.get("medicines") or []
     if not meds:
-        raise HTTPException(422, "at least one medicine is required")
-    doctor = (rec.get("doctor") or {})
+        log_stage("ERROR", "Confirmation rejected: at least one medicine is required")
+        raise HTTPException(422, "At least one medicine is required to confirm prescription")
+    
+    doc_raw = rec.get("doctor") or {}
+    doctor = doc_raw if isinstance(doc_raw, dict) else {"name": str(doc_raw), "reg_no": None}
 
-    names = sorted((m.get("name") or "").strip().lower() for m in meds)
+    names = sorted((m.get("name") or "").strip().lower() for m in meds if isinstance(m, dict))
     if not body.allow_duplicate:
         with engine.connect() as c:
             same = c.execute(select(confirmed_prescriptions.c.id, confirmed_prescriptions.c.data_json).where(
@@ -1167,6 +1286,7 @@ def api_confirm(extraction_id: int, body: ConfirmBody):
         for sid, sdata in same:
             old = json.loads(sdata)
             if sorted((m.get("name") or "").strip().lower() for m in old.get("medicines", [])) == names:
+                log_stage("CONFIRM_DUPLICATE", f"Duplicate detected matching confirmed prescription #{sid}")
                 raise HTTPException(409, f"looks like a duplicate of confirmed prescription #{sid} (same patient, date and medicines). Send allow_duplicate=true to save anyway.")
 
     original = json.loads(ex["analysis_json"])["record"]
@@ -1178,6 +1298,8 @@ def api_confirm(extraction_id: int, body: ConfirmBody):
             doctor=doctor.get("name"), doctor_reg_no=doctor.get("reg_no"), data_json=jd(rec), edits_json=jd(edits),
             confirmed_by=body.confirmed_by, confirmed_at=now_iso())).inserted_primary_key[0]
         for v in rec.get("vitals") or []:
+            if not isinstance(v, dict):
+                continue
             p = parse_vital(v.get("name"), v.get("value"))
             if p["kind"] == "other":
                 continue
@@ -1189,8 +1311,14 @@ def api_confirm(extraction_id: int, body: ConfirmBody):
                 diastolic=p.get("diastolic"), value=p.get("value"), unit=p.get("unit"),
                 raw_text=f"{v.get('name')} {v.get('value')}"[:120], created_at=now_iso()))
             saved_obs += 1
-        c.execute(update(extractions).where(extractions.c.id == extraction_id).values(status="CONFIRMED"))
+        
+        # Keep extractions analysis_json synced with the confirmed doctor review
+        analysis = json.loads(ex["analysis_json"])
+        analysis["record"] = rec
+        c.execute(update(extractions).where(extractions.c.id == extraction_id).values(status="CONFIRMED", analysis_json=jd(analysis)))
         audit(c, "confirmed", extraction_id, dict(prescription_id=pid, by=body.confirmed_by, edits=len(edits), observations=saved_obs))
+    
+    log_stage("CONFIRM", f"Prescription #{pid} successfully confirmed and saved (edits={len(edits)}, vitals={saved_obs})", time.time() - t0)
     return dict(prescription_id=pid, patient_id=patient_id, rx_date=date_iso, edits=edits,
                 observations_saved=saved_obs, observations_skipped=skipped)
 

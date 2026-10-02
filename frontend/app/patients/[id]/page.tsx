@@ -160,9 +160,14 @@ export default function PatientHistoryPage({
                 >
                   <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/80 pb-3">
                     <div className="flex items-center gap-3">
-                      <span className="px-2.5 py-1 rounded-lg bg-emerald-500/10 text-emerald-400 font-mono font-bold text-xs border border-emerald-500/20">
-                        Rx #{rx.id}
-                      </span>
+                      <Link
+                        href={`/extractions/${rx.extraction_id}`}
+                        className="px-2.5 py-1 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 font-mono font-bold text-xs border border-emerald-500/20 transition-colors inline-flex items-center gap-1"
+                        title="View original clinical extraction & OCR"
+                      >
+                        <span>Rx #{rx.id}</span>
+                        <ExternalLink className="w-3 h-3" />
+                      </Link>
                       <div>
                         <span className="text-sm font-bold text-white font-mono">{rx.rx_date}</span>
                         <span className="text-xs text-slate-400 block">
