@@ -1,0 +1,19 @@
+# Core deep learning and OCR framework
+paddlepaddle>=3.0.0
+paddleocr[doc-parser]>=3.3.0
+
+# API and Server
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.9
+
+# AI and Clinical Extraction
+google-genai>=1.0.0
+pydantic>=2.0.0
+rapidfuzz>=3.0.0
+Pillow>=10.0.0
+
+# Database and Utilities
+SQLAlchemy>=2.0.0,<3.0.0
+psycopg2-binary>=2.9.0
+python-dotenv>=1.0.0

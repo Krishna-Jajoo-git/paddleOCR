@@ -1,0 +1,10 @@
+# Install PaddlePaddle first using the command in the setup instructions.
+paddleocr[doc-parser]==3.3.2
+SQLAlchemy>=2.0,<3.0
+Pillow>=10.0
+google-genai>=1.0
+rapidfuzz>=3.0
+fastapi>=0.110
+uvicorn[standard]>=0.27
+python-multipart>=0.0.9
+psycopg2-binary>=2.9

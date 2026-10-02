@@ -1,0 +1,48 @@
+version: "3.9"
+
+services:
+  python-ocr:
+    build:
+      context: ./model
+      dockerfile: Dockerfile
+    container_name: prescription-ocr-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - API_TOKEN=${PYTHON_API_TOKEN:-rx_local_dev_token_2026_secure}
+      - DATABASE_URL=sqlite:////app/data/rx_local.db
+      - PADDLEOCR_DEVICE=cpu
+      - FRONTEND_ORIGIN=http://localhost:3000
+    volumes:
+      - paddlex-cache:/root/.paddlex
+      - db-data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: prescription-intelligence-web
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      python-ocr:
+        condition: service_healthy
+    environment:
+      - NODE_ENV=production
+      - PYTHON_API_URL=http://python-ocr:8000
+      - PYTHON_API_TOKEN=${PYTHON_API_TOKEN:-rx_local_dev_token_2026_secure}
+
+volumes:
+  paddlex-cache:
+    driver: local
+  db-data:
+    driver: local
