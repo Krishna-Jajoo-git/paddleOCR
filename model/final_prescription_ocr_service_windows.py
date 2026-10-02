@@ -1,8 +1,11 @@
+import os
 from dotenv import load_dotenv
 
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(_script_dir, ".env"))
 load_dotenv()
 
-import os, re, io, json, time, hashlib, datetime, statistics, threading, secrets, getpass, subprocess, csv, warnings, traceback
+import re, io, json, time, hashlib, datetime, statistics, threading, secrets, getpass, subprocess, csv, warnings, traceback
 from typing import List, Optional
 
 warnings.filterwarnings("ignore", message=".*To copy construct from a tensor.*")
@@ -53,13 +56,66 @@ MAX_UPLOAD_MB = 10
 ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp", "image/jpg", "image/pjpeg"}
 
 # ---- database --------------------------------------------------------------------------------------------
-if not DATABASE_URL:
-    # Local development database; created in the project folder.
-    DATABASE_URL = "sqlite:///rx_local.db"
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+import urllib.parse
+from sqlalchemy.engine import make_url
 
-print("DB      :", DATABASE_URL.split("@")[-1] if "@" in DATABASE_URL else DATABASE_URL)
+
+def sanitize_database_url(raw_url: Optional[str]) -> str:
+    """
+    Sanitizes and normalizes the database URL for Supabase PostgreSQL.
+    Properly encodes passwords containing special characters (e.g. '@', '#', '%', '!')
+    without double-encoding existing percent-escapes.
+    Normalizes 'postgres://' or 'postgresql://' to 'postgresql+psycopg2://'.
+    """
+    if not raw_url:
+        return ""
+    url = raw_url.strip()
+    if url.startswith("sqlite"):
+        return url
+
+    # Normalize postgres:// -> postgresql://
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+
+    # Match proto://user:password@endpoint
+    match = re.match(
+        r'^(?P<proto>postgresql(?:\+[a-zA-Z0-9_]+)?)://(?P<user>[^:]+):(?P<password>.+)@(?P<endpoint>[^@]+)$',
+        url
+    )
+    if match:
+        proto = match.group("proto")
+        if proto == "postgresql":
+            proto = "postgresql+psycopg2"
+        user = match.group("user")
+        raw_pw = match.group("password")
+        unquoted = urllib.parse.unquote(raw_pw)
+        quoted_pw = urllib.parse.quote_plus(unquoted)
+        endpoint = match.group("endpoint")
+        return f"{proto}://{user}:{quoted_pw}@{endpoint}"
+
+    if url.startswith("postgresql://"):
+        url = "postgresql+psycopg2://" + url[len("postgresql://"):]
+    return url
+
+
+if not DATABASE_URL:
+    raise RuntimeError(
+        "DATABASE_URL is missing or empty. Please configure your Supabase PostgreSQL connection string "
+        "in model/.env (e.g., DATABASE_URL=postgresql://postgres:[PASSWORD]@db.[PROJECT-REF].supabase.co:5432/postgres "
+        "or connection pooler: DATABASE_URL=postgresql://postgres.[PROJECT-REF]:[PASSWORD]@aws-0-[REGION].pooler.supabase.com:6543/postgres). "
+        "For offline local development, you may set DATABASE_URL=sqlite:///rx_local.db"
+    )
+
+CLEAN_DB_URL = sanitize_database_url(DATABASE_URL)
+
+try:
+    parsed_db_url = make_url(CLEAN_DB_URL)
+    is_postgres = parsed_db_url.drivername.startswith("postgresql")
+    masked_db_url = parsed_db_url.render_as_string(hide_password=True)
+except Exception as e:
+    raise RuntimeError(f"Invalid DATABASE_URL configuration: {e}")
+
+print("DB      :", masked_db_url)
 if not _tok:
     print("API key : (auto-generated for this session) ->", API_TOKEN)
 
@@ -71,13 +127,26 @@ Tables: `raw_ocr` (raw OCR lines) - `extractions` (LLM draft + validation result
 `import_medicine_csv("file.csv")` (columns: `name, generic, composition, uses, strengths_mg`).
 """
 
-DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://", 1)
-
 from sqlalchemy import (create_engine, MetaData, Table, Column, Integer, String, Text, Float,
                         select, insert, update, func)
 
-_kw = {"connect_args": {"check_same_thread": False}} if DATABASE_URL.startswith("sqlite") else {"pool_pre_ping": True}
-engine = create_engine(DATABASE_URL, **_kw)
+_kw = {
+    "pool_pre_ping": True,
+    "pool_recycle": 300,
+} if is_postgres else {
+    "connect_args": {"check_same_thread": False}
+}
+
+try:
+    engine = create_engine(CLEAN_DB_URL, **_kw)
+    with engine.connect() as test_conn:
+        test_conn.execute(select(1))
+except Exception as conn_err:
+    raise RuntimeError(
+        f"Could not connect to database ({masked_db_url}). Please verify network access, "
+        f"Supabase project status, and credentials in model/.env. Error: {conn_err}"
+    ) from conn_err
+
 md_ = MetaData()
 
 raw_ocr = Table("raw_ocr", md_,
