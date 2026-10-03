@@ -24,49 +24,71 @@ import {
   Heart,
   CheckCircle2,
   AlertTriangle,
-  ArrowRight,
   Info,
   X,
   Sparkles,
   Loader2,
-  Building,
+  Calendar,
 } from "lucide-react";
 
 export default function PatientDashboard() {
   const router = useRouter();
-  const [user, setUser] = useState<{ name: string; email: string } | null>(null);
+
+  // Dynamic state loaded from Neon DB & JWT
+  const [loading, setLoading] = useState(true);
+  const [userData, setUserData] = useState<any>(null);
+  const [metrics, setMetrics] = useState<any>({
+    totalRecords: 14,
+    hospitalVerified: 7,
+    activeMeds: 2,
+    lastHbA1c: "8.1%",
+    bloodPressure: "146/92 mmHg",
+    historyCoverage: "70%",
+  });
+  const [documents, setDocuments] = useState<any[]>([]);
+
   const [activeTab, setActiveTab] = useState("Overview");
   const [portalMode, setPortalMode] = useState<"patient" | "doctor">("patient");
+
+  // PaddleOCR Modal state
   const [ocrModalOpen, setOcrModalOpen] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [filePreview, setFilePreview] = useState<string | null>(null);
   const [ocrLoading, setOcrLoading] = useState(false);
   const [ocrResult, setOcrResult] = useState<any | null>(null);
+  const [saveStatus, setSaveStatus] = useState<string | null>(null);
+
+  // Load User Profile and Dynamic Data from Neon Database
+  const fetchDashboardData = async () => {
+    try {
+      setLoading(true);
+      const token = localStorage.getItem("auth_token");
+
+      const res = await fetch("/api/user/dashboard", {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+
+      if (res.status === 401) {
+        // If unauthenticated, redirect immediately to login page
+        router.push("/auth");
+        return;
+      }
+
+      const data = await res.json();
+      if (data.success) {
+        setUserData(data.user);
+        if (data.metrics) setMetrics(data.metrics);
+        if (data.documents) setDocuments(data.documents);
+      }
+    } catch (err) {
+      console.error("Failed to load dashboard data:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
-    // Verify JWT Auth token
-    const token = localStorage.getItem("auth_token");
-    const storedUser = localStorage.getItem("user");
-
-    if (storedUser) {
-      try {
-        setUser(JSON.parse(storedUser));
-      } catch (e) {
-        setUser({ name: "Rahul Sharma", email: "rahul.sharma@example.com" });
-      }
-    } else {
-      setUser({ name: "Rahul Sharma", email: "rahul.sharma@example.com" });
-    }
-
-    // Call /api/auth/me for backend session verification
-    fetch("/api/auth/me")
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.authenticated && data.user) {
-          setUser(data.user);
-        }
-      })
-      .catch(() => {});
+    fetchDashboardData();
   }, []);
 
   const handleLogout = async () => {
@@ -84,6 +106,7 @@ export default function PatientDashboard() {
       setSelectedFile(file);
       setFilePreview(URL.createObjectURL(file));
       setOcrResult(null);
+      setSaveStatus(null);
     }
   };
 
@@ -92,23 +115,43 @@ export default function PatientDashboard() {
 
     setOcrLoading(true);
     setOcrResult(null);
+    setSaveStatus(null);
 
     const formData = new FormData();
     formData.append("file", selectedFile);
 
     try {
-      // Connect to Python PaddleOCR backend server at http://localhost:8000/api/ocr
+      // 1. Send to Python PaddleOCR backend
       const res = await fetch("http://localhost:8000/api/ocr", {
         method: "POST",
         body: formData,
       });
 
       if (!res.ok) {
-        throw new Error("OCR server error or connection timed out");
+        throw new Error("PaddleOCR server connection error");
       }
 
       const data = await res.json();
       setOcrResult(data);
+
+      // 2. Persist OCR findings dynamically to Neon Database
+      const token = localStorage.getItem("auth_token");
+      const saveRes = await fetch("/api/user/save-ocr", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          filename: selectedFile.name,
+          ocrResults: data,
+        }),
+      });
+
+      if (saveRes.ok) {
+        setSaveStatus("Saved to Neon Database successfully!");
+        fetchDashboardData(); // Refresh metrics dynamically from Neon DB
+      }
     } catch (err: any) {
       setOcrResult({
         error: true,
@@ -118,6 +161,20 @@ export default function PatientDashboard() {
       setOcrLoading(false);
     }
   };
+
+  const userName = userData?.name || "Rahul Sharma";
+  const userInitials = userData?.initials || "RS";
+  const patientCode = userData?.patientCode || "DEMO-P001";
+  const userEmail = userData?.email || "rahul.sharma@example.com";
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-[#f4f7f6] flex flex-col items-center justify-center p-4">
+        <Loader2 className="w-10 h-10 text-[#008080] animate-spin mb-3" />
+        <p className="text-xs font-bold text-slate-600">Loading your Patient DMR Dashboard from Neon DB...</p>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#f4f7f6] text-slate-800 font-sans flex flex-col">
@@ -132,33 +189,44 @@ export default function PatientDashboard() {
               Patient-Centric DMR
             </h1>
             <span className="px-2 py-0.5 text-[11px] font-bold text-[#0d9488] border border-[#0d9488]/30 rounded bg-[#0d9488]/5 tracking-wider uppercase">
-              DEMO MVP
+              {patientCode}
             </span>
           </div>
         </div>
 
-        <div className="flex items-center gap-2 bg-slate-100 p-1 rounded-full border border-slate-200">
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2 bg-slate-100 p-1 rounded-full border border-slate-200">
+            <button
+              onClick={() => setPortalMode("patient")}
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-full transition-all ${
+                portalMode === "patient"
+                  ? "bg-white text-slate-900 shadow-xs"
+                  : "text-slate-500 hover:text-slate-800"
+              }`}
+            >
+              <User className="w-3.5 h-3.5" />
+              Patient Portal
+            </button>
+            <button
+              onClick={() => setPortalMode("doctor")}
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-full transition-all ${
+                portalMode === "doctor"
+                  ? "bg-white text-slate-900 shadow-xs"
+                  : "text-slate-500 hover:text-slate-800"
+              }`}
+            >
+              <Stethoscope className="w-3.5 h-3.5" />
+              Doctor Portal
+            </button>
+          </div>
+
           <button
-            onClick={() => setPortalMode("patient")}
-            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-full transition-all ${
-              portalMode === "patient"
-                ? "bg-white text-slate-900 shadow-xs"
-                : "text-slate-500 hover:text-slate-800"
-            }`}
+            onClick={handleLogout}
+            title="Sign Out"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-600 hover:text-rose-600 hover:bg-rose-50 rounded-xl border border-slate-200 transition-colors"
           >
-            <User className="w-3.5 h-3.5" />
-            Patient Portal
-          </button>
-          <button
-            onClick={() => setPortalMode("doctor")}
-            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-full transition-all ${
-              portalMode === "doctor"
-                ? "bg-white text-slate-900 shadow-xs"
-                : "text-slate-500 hover:text-slate-800"
-            }`}
-          >
-            <Stethoscope className="w-3.5 h-3.5" />
-            Doctor Portal
+            <LogOut className="w-3.5 h-3.5" />
+            <span>Sign Out</span>
           </button>
         </div>
       </header>
@@ -167,17 +235,20 @@ export default function PatientDashboard() {
         {/* Left Sidebar Navigation */}
         <aside className="w-64 bg-white border-r border-slate-200 p-4 flex flex-col justify-between shrink-0">
           <div className="space-y-4">
-            {/* User Profile Info Card */}
-            <div className="bg-[#f0fdfa] border border-[#ccfbf1] p-3 rounded-2xl flex items-center gap-3">
-              <div className="w-10 h-10 rounded-full bg-[#0f766e] text-white flex items-center justify-center font-bold text-sm shadow-xs">
-                RS
+            {/* Dynamic User Profile Info Card */}
+            <div className="bg-[#f0fdfa] border border-[#ccfbf1] p-3.5 rounded-2xl flex items-center gap-3">
+              <div className="w-10 h-10 rounded-full bg-[#0f766e] text-white flex items-center justify-center font-extrabold text-sm shadow-xs shrink-0">
+                {userInitials}
               </div>
               <div className="overflow-hidden">
-                <h2 className="text-xs font-bold text-slate-900 truncate">
-                  {user?.name || "Rahul Sharma"}
+                <h2 className="text-xs font-extrabold text-slate-900 truncate">
+                  {userName}
                 </h2>
                 <p className="text-[11px] text-slate-500 truncate">
-                  42y • Male • DEMO-P001
+                  {userEmail}
+                </p>
+                <p className="text-[10px] font-bold text-teal-700 mt-0.5">
+                  ID: {patientCode}
                 </p>
               </div>
             </div>
@@ -240,18 +311,18 @@ export default function PatientDashboard() {
               App Controls
             </p>
             <button
-              onClick={() => window.location.reload()}
+              onClick={fetchDashboardData}
               className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-50 rounded-xl transition-colors border border-slate-200"
             >
               <RotateCcw className="w-3.5 h-3.5 text-slate-400" />
-              Reset Demo Data
+              Sync Neon DB
             </button>
             <button
               onClick={handleLogout}
               className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-slate-600 hover:text-rose-600 hover:bg-rose-50 rounded-xl transition-colors border border-slate-200"
             >
               <LogOut className="w-3.5 h-3.5 text-slate-400" />
-              Return to Home / Sign Out
+              Sign Out
             </button>
           </div>
         </aside>
@@ -263,14 +334,14 @@ export default function PatientDashboard() {
             <div>
               <div className="flex items-center gap-2 mb-1">
                 <h2 className="text-2xl font-extrabold text-slate-900">
-                  Welcome, {user?.name || "Rahul Sharma"}
+                  Welcome, {userName}
                 </h2>
                 <span className="bg-teal-50 text-teal-700 text-xs font-bold px-2.5 py-0.5 rounded border border-teal-200">
-                  DEMO-P001
+                  {patientCode}
                 </span>
               </div>
               <p className="text-xs text-slate-500">
-                Personal Medical Record • Longitudinal Care Summary as of September 2026
+                Personal Medical Record • Longitudinal Care Summary as of October 2026
               </p>
             </div>
 
@@ -309,7 +380,7 @@ export default function PatientDashboard() {
             </button>
           </div>
 
-          {/* 6 Key Metric Summary Cards */}
+          {/* 6 Key Dynamic Metric Summary Cards */}
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
             {/* Card 1 */}
             <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs flex flex-col justify-between">
@@ -318,8 +389,8 @@ export default function PatientDashboard() {
                 <FileText className="w-4 h-4 text-slate-400" />
               </div>
               <div>
-                <span className="text-2xl font-extrabold text-slate-900">14</span>
-                <p className="text-[10px] text-slate-400 mt-0.5">Across 7 years</p>
+                <span className="text-2xl font-extrabold text-slate-900">{metrics.totalRecords}</span>
+                <p className="text-[10px] text-slate-400 mt-0.5">Across Neon DB</p>
               </div>
             </div>
 
@@ -330,8 +401,8 @@ export default function PatientDashboard() {
                 <ShieldCheck className="w-4 h-4 text-emerald-500" />
               </div>
               <div>
-                <span className="text-2xl font-extrabold text-slate-900">7</span>
-                <p className="text-[10px] text-teal-600 font-medium mt-0.5">50% of total</p>
+                <span className="text-2xl font-extrabold text-slate-900">{metrics.hospitalVerified}</span>
+                <p className="text-[10px] text-teal-600 font-medium mt-0.5">Verified EHR</p>
               </div>
             </div>
 
@@ -342,7 +413,7 @@ export default function PatientDashboard() {
                 <Pill className="w-4 h-4 text-indigo-500" />
               </div>
               <div>
-                <span className="text-2xl font-extrabold text-slate-900">2</span>
+                <span className="text-2xl font-extrabold text-slate-900">{metrics.activeMeds}</span>
                 <p className="text-[10px] text-slate-400 mt-0.5">Oral therapies</p>
               </div>
             </div>
@@ -354,7 +425,7 @@ export default function PatientDashboard() {
                 <Activity className="w-4 h-4 text-amber-500" />
               </div>
               <div>
-                <span className="text-2xl font-extrabold text-[#d97706]">8.1%</span>
+                <span className="text-2xl font-extrabold text-[#d97706]">{metrics.lastHbA1c}</span>
                 <p className="text-[10px] text-amber-600 font-medium mt-0.5">Aug 2026 (Elevated)</p>
               </div>
             </div>
@@ -362,13 +433,12 @@ export default function PatientDashboard() {
             {/* Card 5 */}
             <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs flex flex-col justify-between">
               <div className="flex items-center justify-between text-slate-400 mb-2">
-                <span className="text-[11px] font-semibold text-slate-500">Latest Blood Pressure</span>
+                <span className="text-[11px] font-semibold text-slate-500">Blood Pressure</span>
                 <Heart className="w-4 h-4 text-rose-500" />
               </div>
               <div>
-                <div className="text-lg font-extrabold text-slate-900 leading-tight">146/92</div>
-                <span className="text-[11px] font-bold text-slate-900">mmHg</span>
-                <p className="text-[10px] text-slate-400 mt-0.5">10 Sep 2026 (Stage 1)</p>
+                <div className="text-lg font-extrabold text-slate-900 leading-tight">{metrics.bloodPressure}</div>
+                <p className="text-[10px] text-slate-400 mt-0.5">Stage 1 Control</p>
               </div>
             </div>
 
@@ -379,55 +449,61 @@ export default function PatientDashboard() {
                 <CheckCircle2 className="w-4 h-4 text-teal-500" />
               </div>
               <div>
-                <span className="text-2xl font-extrabold text-slate-900">70%</span>
+                <span className="text-2xl font-extrabold text-slate-900">{metrics.historyCoverage}</span>
                 <p className="text-[10px] text-teal-600 font-medium mt-0.5">Good baseline</p>
               </div>
             </div>
           </div>
 
-          {/* Bottom Grid: Longitudinal Care Summary & Prioritization Hierarchy */}
+          {/* Bottom Grid: Dynamic Documents List & Care Summary */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            {/* Left 2 Columns: Longitudinal Health Status Summary */}
+            {/* Left 2 Columns: Dynamic Patient Medical Documents & Care Summary */}
             <div className="lg:col-span-2 bg-white p-6 rounded-2xl border border-slate-200/80 shadow-xs space-y-4">
               <div className="flex items-center justify-between border-b border-slate-100 pb-3">
                 <div className="flex items-center gap-2">
                   <Activity className="w-4 h-4 text-[#008080]" />
                   <h3 className="text-sm font-bold text-slate-900">
-                    Longitudinal Health Status Summary
+                    Longitudinal Care Summary & Saved Documents
                   </h3>
                 </div>
-                <span className="text-[11px] text-slate-400">Updated 13 Sep 2026</span>
+                <span className="text-[11px] text-slate-400">{documents.length} Records in Neon DB</span>
               </div>
 
               <p className="text-xs text-slate-600 leading-relaxed">
-                Rahul Sharma is a 42-year-old male with active <strong className="text-slate-800">Type 2 Diabetes Mellitus</strong> (diagnosed June 2021) and <strong className="text-slate-800">Essential Hypertension</strong> (diagnosed March 2023). Current glycemic indices demonstrate sub-optimal control with an HbA1c of 8.1% (August 2026) and fasting glucose of 168 mg/dL. On 10 September 2026, Dr. Priya Deshmukh initiated Metformin 500 mg BID alongside ongoing Telmisartan 40 mg OD. Mild transient epigastric discomfort was subsequently logged by the patient.
+                Summary for patient <strong className="text-slate-800">{userName}</strong> ({userEmail}). Integrated with Neon PostgreSQL and automated document OCR telemetry.
               </p>
 
-              {/* Sub-cards */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-2">
-                <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/60">
-                  <span className="text-[10px] font-semibold text-slate-400 block mb-1">Primary Diagnosis</span>
-                  <h4 className="text-xs font-bold text-slate-900 mb-1.5">Type 2 Diabetes Mellitus</h4>
-                  <span className="inline-block text-[10px] font-bold text-sky-700 bg-sky-50 border border-sky-200 px-1.5 py-0.5 rounded">
-                    ICD E11.9
-                  </span>
-                </div>
-
-                <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/60">
-                  <span className="text-[10px] font-semibold text-slate-400 block mb-1">Secondary Diagnosis</span>
-                  <h4 className="text-xs font-bold text-slate-900 mb-1.5">Essential Hypertension</h4>
-                  <span className="inline-block text-[10px] font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 px-1.5 py-0.5 rounded">
-                    ICD I10
-                  </span>
-                </div>
-
-                <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/60">
-                  <span className="text-[10px] font-semibold text-slate-400 block mb-1">Primary Facility</span>
-                  <h4 className="text-xs font-bold text-slate-900 mb-1.5">Demo General Hospital</h4>
-                  <span className="inline-block text-[10px] font-bold text-teal-700 bg-teal-50 border border-teal-200 px-1.5 py-0.5 rounded">
-                    ABDM Connected
-                  </span>
-                </div>
+              {/* Dynamic User Documents Table */}
+              <div className="space-y-2 pt-2">
+                {documents.length > 0 ? (
+                  documents.map((doc, idx) => (
+                    <div key={idx} className="bg-slate-50 p-3 rounded-xl border border-slate-200/60 flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-3 overflow-hidden">
+                        <div className="w-8 h-8 rounded-lg bg-teal-500/10 text-teal-700 flex items-center justify-center shrink-0">
+                          <FileText className="w-4 h-4" />
+                        </div>
+                        <div className="overflow-hidden">
+                          <h4 className="text-xs font-bold text-slate-900 truncate">{doc.filename}</h4>
+                          <p className="text-[10px] text-slate-500 truncate">{doc.summary}</p>
+                        </div>
+                      </div>
+                      <div className="text-right shrink-0">
+                        <span className="inline-block text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded uppercase mb-1">
+                          {doc.status}
+                        </span>
+                        <p className="text-[10px] text-slate-400">
+                          {new Date(doc.uploadedAt).toLocaleDateString()}
+                        </p>
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <div className="text-center py-6 border border-dashed border-slate-200 rounded-xl">
+                    <FileText className="w-8 h-8 text-slate-300 mx-auto mb-2" />
+                    <p className="text-xs text-slate-500 font-medium">No custom documents uploaded yet for {userName}.</p>
+                    <p className="text-[11px] text-slate-400 mt-0.5">Click "Upload Document" to process prescription images with PaddleOCR!</p>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -465,7 +541,7 @@ export default function PatientDashboard() {
                     </span>
                   </div>
                   <p className="text-[11px] text-amber-700 leading-relaxed">
-                    External clinic records, scanned prescriptions, and lab printouts verified via document PaddleOCR.
+                    External clinic records, scanned prescriptions, and lab printouts verified via PaddleOCR.
                   </p>
                 </div>
               </div>
@@ -485,7 +561,7 @@ export default function PatientDashboard() {
                 </div>
                 <div>
                   <h3 className="text-sm font-bold text-slate-900">PaddleOCR Medical Document Scanner</h3>
-                  <p className="text-[11px] text-slate-400">Powered by Python 3.11 & NVIDIA RTX 4050</p>
+                  <p className="text-[11px] text-slate-400">Saving findings directly to user profile in Neon DB</p>
                 </div>
               </div>
               <button
@@ -515,6 +591,14 @@ export default function PatientDashboard() {
             {filePreview && (
               <div className="max-h-40 overflow-hidden rounded-xl border border-slate-200 bg-slate-950 flex items-center justify-center p-2">
                 <img src={filePreview} alt="Preview" className="max-h-36 object-contain" />
+              </div>
+            )}
+
+            {/* Save Status Alert */}
+            {saveStatus && (
+              <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl text-xs font-bold flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                <span>{saveStatus}</span>
               </div>
             )}
 
@@ -554,12 +638,12 @@ export default function PatientDashboard() {
                 {ocrLoading ? (
                   <>
                     <Loader2 className="w-4 h-4 animate-spin" />
-                    Running PaddleOCR...
+                    Running PaddleOCR & Saving to DB...
                   </>
                 ) : (
                   <>
                     <Sparkles className="w-4 h-4" />
-                    Extract Medical Text
+                    Extract & Save to Neon DB
                   </>
                 )}
               </button>
