@@ -90,6 +90,7 @@ export interface ExtractionPayload {
   ocr_id: number;
   status: ExtractionStatus;
   llm_model: string;
+  patient_id?: string;
   duplicate?: boolean;
   gate: QualityGate;
   warnings: string[];

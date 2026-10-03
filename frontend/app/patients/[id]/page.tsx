@@ -21,6 +21,7 @@ import {
   RefreshCw,
   CheckCircle2,
   AlertCircle,
+  ExternalLink,
 } from "lucide-react";
 
 export default function PatientHistoryPage({

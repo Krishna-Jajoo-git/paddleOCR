@@ -9,6 +9,10 @@
 venv/
 ENV/
 env/
+python311/
+python311_pkg/
+uv_bin/
+.uv_cache/
 __pycache__/
 *.py[cod]
 *$py.class
